@@ -6,7 +6,8 @@ case class ApplicationConfig(
     http: HttpConfig,
     oneFrame: OneFrameConfig,
     cache: CacheConfig,
-    rateLimiter: RateLimiterConfig
+    rateLimiter: RateLimiterConfig,
+    circuitBreaker: CircuitBreakerConfig
 )
 
 case class HttpConfig(
@@ -18,7 +19,8 @@ case class HttpConfig(
 case class OneFrameConfig(
     baseUri: String,
     authToken: String,
-    timeout: FiniteDuration
+    timeout: FiniteDuration,
+    maxRetries: Int
 )
 
 case class CacheConfig(
@@ -28,3 +30,5 @@ case class CacheConfig(
 )
 
 case class RateLimiterConfig(maxRequestsPerMinute: Int)
+
+case class CircuitBreakerConfig(maxFailures: Int, resetTimeout: FiniteDuration)

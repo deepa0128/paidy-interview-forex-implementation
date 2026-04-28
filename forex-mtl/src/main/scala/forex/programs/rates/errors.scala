@@ -22,8 +22,9 @@ object errors {
   }
 
   def toProgramError(error: RatesServiceError): Error = error match {
-    case RatesServiceError.OneFrameQuotaExceeded      => Error.UpstreamUnavailable("One-Frame API quota exceeded for today")
-    case RatesServiceError.OneFrameUnreachable(cause) => Error.UpstreamUnavailable(s"One-Frame is unreachable: ${cause.getMessage}")
-    case RatesServiceError.OneFrameLookupFailed(msg)  => Error.UpstreamUnavailable(s"One-Frame error: $msg")
+    case RatesServiceError.OneFrameQuotaExceeded => Error.UpstreamUnavailable("One-Frame API quota exceeded for today")
+    case RatesServiceError.OneFrameUnreachable(cause) =>
+      Error.UpstreamUnavailable(s"One-Frame is unreachable: ${cause.getMessage}")
+    case RatesServiceError.OneFrameLookupFailed(msg) => Error.UpstreamUnavailable(s"One-Frame error: $msg")
   }
 }

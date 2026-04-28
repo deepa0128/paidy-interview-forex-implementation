@@ -8,5 +8,5 @@ object errors {
     final case class OneFrameUnreachable(cause: Throwable) extends Error
     final case class OneFrameLookupFailed(msg: String) extends Error
   }
-  
+
 }
