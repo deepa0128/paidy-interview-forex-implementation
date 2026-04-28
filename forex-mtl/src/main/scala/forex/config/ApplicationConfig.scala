@@ -5,7 +5,8 @@ import scala.concurrent.duration.FiniteDuration
 case class ApplicationConfig(
     http: HttpConfig,
     oneFrame: OneFrameConfig,
-    cache: CacheConfig
+    cache: CacheConfig,
+    rateLimiter: RateLimiterConfig
 )
 
 case class HttpConfig(
@@ -25,3 +26,5 @@ case class CacheConfig(
     softTtl: FiniteDuration,
     maxStaleOnError: FiniteDuration
 )
+
+case class RateLimiterConfig(maxRequestsPerMinute: Int)
