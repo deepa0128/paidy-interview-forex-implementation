@@ -154,3 +154,172 @@ The HTTP layer turns that into a `400 Bad Request` with a JSON error body.
 `GET /rates?from=USD&to=USD` is a valid request. USD always exchanges to USD at 1.0.
 The program layer intercepts this case and returns immediately without touching the cache
 or the upstream API.
+
+---
+
+## API
+
+```
+GET /rates?from={CURRENCY}&to={CURRENCY}
+```
+
+Supported currencies: `AUD CAD CHF EUR GBP JPY NZD SGD USD`
+
+**Success (200)**
+```json
+{
+  "from": "USD",
+  "to": "EUR",
+  "price": 0.8432,
+  "timestamp": "2026-04-28T05:53:56.522Z"
+}
+```
+
+**Error responses**
+
+| Status | When | Body |
+|--------|------|------|
+| 400 | Missing or unrecognised currency | `{"error": "Unsupported currency: XYZ"}` |
+| 400 | Missing query parameter | `{"error": "Both 'from' and 'to' query parameters are required"}` |
+| 429 | Per-IP rate limit exceeded | `{"error": "..."}` + `Retry-After: <seconds>` header |
+| 502 | One-Frame unreachable or quota exceeded | `{"error": "One-Frame is unreachable: ..."}` |
+| 500 | Unexpected internal error | `{"error": "..."}` |
+
+---
+
+## Compliance
+
+### Requirement 1 — return a rate for two supported currencies
+
+```bash
+curl 'http://localhost:8081/rates?from=USD&to=EUR'
+# {"from":"USD","to":"EUR","price":0.8432,"timestamp":"2026-04-28T05:53:56.522Z"}
+```
+
+All 72 pairs work. Invalid input returns a descriptive error:
+
+```bash
+curl 'http://localhost:8081/rates?from=BTC&to=USD'
+# HTTP 400 — {"error":"Unsupported currency: BTC"}
+
+curl 'http://localhost:8081/rates?from=USD'
+# HTTP 400 — {"error":"Both 'from' and 'to' query parameters are required"}
+```
+
+### Requirement 2 — rate not older than 5 minutes
+
+Hard TTL is enforced at the cache layer. `CacheEntry.isExpired` returns `true` at exactly
+5 minutes. An expired entry is never served — the request fetches synchronously. The test
+suite includes a case that seeds a 5m30s-old entry and asserts the fresh price is returned.
+
+### Requirement 3 — ≥10,000 client requests/day within 1,000 upstream calls
+
+```
+60 min/hr ÷ 4 min soft-TTL = 15 upstream calls/hr
+15 × 24 hr                 = 360 upstream calls/day   (limit: 1,000)
+
+Client requests served from cache between refreshes: unlimited
+```
+
+The 360 figure is the worst case under sustained load. Under zero or low traffic, the SWR
+policy means fewer upstream calls. The 640-call headroom also absorbs cache misses on cold
+starts and any retries.
+
+---
+
+## Configuration
+
+| Key | Default | Env var override | Description |
+|-----|---------|-----------------|-------------|
+| `http.host` | `0.0.0.0` | — | Bind address |
+| `http.port` | `8081` | — | Proxy listen port |
+| `http.timeout` | `40 seconds` | — | Per-request server timeout |
+| `one-frame.base-uri` | `http://localhost:8080` | `ONE_FRAME_BASE_URI` | One-Frame base URL |
+| `one-frame.auth-token` | *(empty)* | `ONE_FRAME_TOKEN` | One-Frame auth token |
+| `one-frame.timeout` | `10 seconds` | — | Upstream request timeout; prevents infinite wait on hung connections |
+| `one-frame.max-retries` | `3` | — | Maximum retry attempts for unreachable upstream calls |
+| `circuit-breaker.max-failures` | `5` | — | Consecutive unreachable failures before opening the circuit |
+| `circuit-breaker.reset-timeout` | `60 seconds` | — | Wait time before half-open probe after circuit opens |
+| `cache.ttl` | `5 minutes` | — | Hard freshness ceiling |
+| `cache.soft-ttl` | `4 minutes` | — | SWR revalidation boundary |
+| `cache.max-stale-on-error` | `5 minutes` | — | Serve expired cache on One-Frame outage; raise to e.g. 10 min to tolerate stale over 502 |
+| `rate-limiter.max-requests-per-minute` | `100` | — | Per-IP request cap. Requests above the limit return `429 Too Many Requests` |
+
+---
+
+## Prerequisites
+
+Use Java 17 for sbt commands in this project.
+
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+```
+
+On Linux, set `JAVA_HOME` to your Java 17 installation path instead.
+
+---
+
+## Running locally
+
+**1. Start One-Frame (port 8080)**
+```bash
+docker run -p 8080:8080 paidyinc/one-frame
+```
+
+**2. Start the proxy (port 8081)**
+```bash
+ONE_FRAME_TOKEN=10dc303535874aeccc86a8251e6992f5 sbt run
+```
+
+**3. Try it**
+```bash
+curl 'http://localhost:8081/rates?from=USD&to=EUR'
+curl 'http://localhost:8081/rates?from=USD&to=USD'   # returns 1.0 instantly, no upstream call
+curl 'http://localhost:8081/rates?from=XYZ&to=USD'   # 400 with error message
+```
+
+---
+
+## Running the tests
+
+```bash
+sbt test
+```
+
+No Docker or network access required. The test suite runs entirely in-memory using mock
+One-Frame backends built inline. 53 tests across 5 specs:
+
+| Spec | What it covers |
+|------|---------------|
+| `CurrencySpec` | `fromString` parsing, case sensitivity, `allPairs` size and correctness |
+| `RatesCacheSpec` | get/put, SWR freshness boundaries, overwrite behaviour |
+| `OneFrameClientSpec` | JSON decoding, quota error detection, auth header, pair encoding, malformed base URI |
+| `RatesProgramSpec` | Same-currency short-circuit, error mapping from service to program layer |
+| `RatesRoutesIntegrationSpec` | Full stack — 15 end-to-end scenarios including coalescing, SWR, graceful degradation, and rate limiting |
+
+---
+
+## Extending
+
+### Add a currency
+
+1. Add a `case object` to `Currency`
+2. Add it to `Currency.values`
+
+`fromString`, `allPairs`, and the cache all update automatically.
+
+### Swap the cache for Redis
+
+Not needed for a single instance — in-memory is faster and has no external failure mode.
+Redis becomes relevant when running multiple instances that need to share rate state, or
+when cache warmth across restarts matters.
+
+Implement `CacheAlgebra[F]` in `forex/services/rates/cache/` using a Redis client
+(e.g. [redis4cats](https://redis4cats.profunktor.dev/)). Pass the new instance to
+`OneFrameLive.makeWithCache`. Nothing else in the stack changes.
+
+### Add a second upstream provider
+
+Implement `OneFrameClientAlgebra[F]` for the new provider. The `OneFrameLive` interpreter
+accepts any implementation of that algebra — switching or wrapping providers is a wiring
+change, not a logic change.
