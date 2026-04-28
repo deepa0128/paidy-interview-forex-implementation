@@ -39,9 +39,10 @@ trait OneFrameClientAlgebra[F[_]] {
   *   - Auth via a raw `token <secret>` header.
   *   - Pair encoding: `pair=USDEUR` (concatenated currencies without separators).
   */
-class OneFrameHttpClient[F[_]: Sync](
+class OneFrameHttpClient[F[_]: Sync] private (
     client: Client[F],
-    config: OneFrameConfig
+    config: OneFrameConfig,
+    baseUri: Uri
 ) extends OneFrameClientAlgebra[F] {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -61,7 +62,7 @@ class OneFrameHttpClient[F[_]: Sync](
       .map(p => s"pair=${Currency.show.show(p.from)}${Currency.show.show(p.to)}")
       .mkString("&")
 
-    val uri = Uri.unsafeFromString(s"${config.baseUri}/rates?$pairParams")
+    val uri = Uri.unsafeFromString(s"${baseUri.renderString}/rates?$pairParams")
 
     Request[F](
       method = Method.GET,
@@ -108,6 +109,12 @@ object OneFrameHttpClient {
   def apply[F[_]: Sync](
       client: Client[F],
       config: OneFrameConfig
-  ): OneFrameClientAlgebra[F] =
-    new OneFrameHttpClient[F](client, config)
+  ): F[OneFrameClientAlgebra[F]] =
+    Sync[F]
+      .fromEither(
+        Uri
+          .fromString(config.baseUri)
+          .leftMap(e => new IllegalArgumentException(s"Invalid One-Frame base URI '${config.baseUri}': ${e.message}"))
+      )
+      .map(new OneFrameHttpClient[F](client, config, _))
 }

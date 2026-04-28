@@ -1,8 +1,10 @@
 package forex.services.rates.interpreters
 
 import cats.data.NonEmptyList
+import cats.effect.ExitCase
 import cats.effect.concurrent.{ Deferred, Ref }
 import cats.effect.{ Concurrent, Resource, Timer }
+import cats.effect.syntax.bracket._
 import cats.syntax.applicative._
 import cats.syntax.applicativeError._
 import cats.syntax.either._
@@ -81,13 +83,19 @@ class OneFrameLive[F[_]: Concurrent: Timer] private (
         .flatMap {
           case Left(ourGate) =>
             fetchAllPairsAndPopulateCache
-              .flatTap(result => ourGate.complete(result))
-              .flatTap(_ => fetchGate.set(None))
+              .flatTap(ourGate.complete)
               .handleErrorWith { err =>
                 val svcError: ServiceError = ServiceError.OneFrameUnreachable(err)
-                ourGate.complete(svcError.asLeft) >>
-                  fetchGate.set(None) >>
-                  svcError.asLeft[Unit].pure[F]
+                ourGate.complete(svcError.asLeft).as(svcError.asLeft[Unit])
+              }
+              .guaranteeCase {
+                case ExitCase.Canceled =>
+                  ourGate
+                    .complete(ServiceError.OneFrameUnreachable(new java.util.concurrent.CancellationException("fetch cancelled")).asLeft)
+                    .attempt
+                    .void >> fetchGate.set(None)
+                case _ =>
+                  fetchGate.set(None)
               }
 
           case Right(theirGate) =>
@@ -132,7 +140,9 @@ object OneFrameLive {
       httpClient: Client[F],
       config: ApplicationConfig
   ): Resource[F, Algebra[F]] =
-    Resource.eval(make(OneFrameHttpClient[F](httpClient, config.oneFrame), config))
+    Resource.eval(
+      OneFrameHttpClient[F](httpClient, config.oneFrame).flatMap(make(_, config))
+    )
 
   def make[F[_]: Concurrent: Timer](
       client: OneFrameClientAlgebra[F],
