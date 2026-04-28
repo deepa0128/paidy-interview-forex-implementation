@@ -8,6 +8,8 @@ import io.circe._
 import io.circe.generic.extras.Configuration
 import io.circe.generic.extras.semiauto.deriveConfiguredEncoder
 
+import java.time.format.DateTimeFormatter
+
 object Protocol {
 
   implicit val configuration: Configuration = Configuration.default.withSnakeCaseMemberNames
@@ -25,7 +27,13 @@ object Protocol {
   )
 
   implicit val currencyEncoder: Encoder[Currency] =
-    Encoder.instance[Currency] { show.show _ andThen Json.fromString }
+    Encoder.instance[Currency](show.show _ andThen Json.fromString)
+
+  implicit val priceEncoder: Encoder[Price] =
+    Encoder.instance[Price](p => Json.fromBigDecimal(p.value))
+
+  implicit val timestampEncoder: Encoder[Timestamp] =
+    Encoder.instance[Timestamp](t => Json.fromString(t.value.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)))
 
   implicit val pairEncoder: Encoder[Pair] =
     deriveConfiguredEncoder[Pair]

@@ -1,15 +1,18 @@
 package forex.http.rates
 
+import cats.syntax.either._
 import forex.domain.Currency
-import org.http4s.QueryParamDecoder
-import org.http4s.dsl.impl.QueryParamDecoderMatcher
+import org.http4s.{ ParseFailure, QueryParamDecoder }
+import org.http4s.dsl.impl.OptionalValidatingQueryParamDecoderMatcher
 
 object QueryParams {
 
   private[http] implicit val currencyQueryParam: QueryParamDecoder[Currency] =
-    QueryParamDecoder[String].map(Currency.fromString)
+    QueryParamDecoder[String].emap { s =>
+      Currency.fromString(s).leftMap(msg => ParseFailure(msg, msg))
+    }
 
-  object FromQueryParam extends QueryParamDecoderMatcher[Currency]("from")
-  object ToQueryParam extends QueryParamDecoderMatcher[Currency]("to")
+  object FromQueryParam extends OptionalValidatingQueryParamDecoderMatcher[Currency]("from")
+  object ToQueryParam extends OptionalValidatingQueryParamDecoderMatcher[Currency]("to")
 
 }
