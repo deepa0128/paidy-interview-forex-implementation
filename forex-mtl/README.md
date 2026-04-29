@@ -104,10 +104,22 @@ This supports easier querying/alerting in centralized log systems.
 ### Retry + circuit breaker
 
 For upstream connectivity failures:
-- requests are retried (bounded by `one-frame.max-retries`)
+- requests are retried (bounded by `one-frame.max-retries`) with exponential backoff
 - repeated failures open a circuit breaker (`circuit-breaker.max-failures`)
 - breaker transitions back via reset timeout (`circuit-breaker.reset-timeout`)
-This prevents hammering an unhealthy upstream and improves recovery behavior.
+
+Only `OneFrameUnreachable` errors trigger retries and count toward the failure threshold. Quota errors (`OneFrameQuotaExceeded`) pass through immediately and do not open the circuit.
+
+### Daily quota tracking
+
+Each successful upstream call increments an in-process counter that resets at UTC midnight. Warning thresholds:
+
+| Calls today | Log level | Event |
+|-------------|-----------|-------|
+| ≥ 800 | `WARN` | `quota_alert` with `level: "warning"` |
+| ≥ 950 | `ERROR` | `quota_alert` with `level: "critical"` |
+
+The counter is in-memory and resets on restart. If the service restarts mid-day with 900 calls already made, the counter will not reflect prior usage. Raise `max-stale-on-error` as an operational mitigation if continuity across restarts is required.
 
 ## Constraints and Resulting Design
 
@@ -230,12 +242,17 @@ Use Java 17:
 ## Tests
 ```bash sbt test```
 
-The suite runs in-memory (no network dependency) and currently covers:
-- `CurrencySpec`: parsing, case handling, pair enumeration correctness.
-- `RatesCacheSpec`: cache put/get and SWR freshness boundaries.
-- `OneFrameClientSpec`: decoding, quota detection, auth header, malformed URI.
-- `RatesProgramSpec`: same-currency shortcut and error mapping.
-- `RatesRoutesIntegrationSpec`: end-to-end behavior, coalescing, SWR, degradation, rate limiting.
+The suite runs entirely in-memory (no network, no Docker). 66 tests across 7 specs:
+
+| Spec | What it covers |
+|------|----------------|
+| `CurrencySpec` | `fromString` parsing, case sensitivity, `allPairs` size and correctness |
+| `RatesCacheSpec` | get/put, SWR freshness boundaries, overwrite behaviour |
+| `OneFrameClientSpec` | JSON decoding, quota error detection, auth header, pair encoding, malformed base URI |
+| `RatesProgramSpec` | Same-currency short-circuit, error mapping from service to program layer |
+| `CircuitBreakerSpec` | Closed/Open/HalfOpen state transitions, quota errors not counted as failures, probe on reset |
+| `OneFrameLiveSpec` | Retry succeeds after transient failures, quota errors not retried, WARN/ERROR quota alerts at 800/950 |
+| `RatesRoutesIntegrationSpec` | Full stack — 15 end-to-end scenarios including coalescing, SWR, graceful degradation, and rate limiting |
 
 ## Extensions
 

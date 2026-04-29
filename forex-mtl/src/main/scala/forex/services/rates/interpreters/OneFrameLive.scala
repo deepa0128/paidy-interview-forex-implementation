@@ -38,6 +38,7 @@ class OneFrameLive[F[_]: Concurrent: Timer] private (
   private val ttl             = config.cache.ttl
   private val maxStaleOnError = config.cache.maxStaleOnError
   private val maxRetries      = config.oneFrame.maxRetries
+  private val allPairsNel     = NonEmptyList.fromListUnsafe(Rate.Pair.allPairs)
 
   override def isReady: F[Boolean] = cache.allKeys.map(_.nonEmpty)
 
@@ -150,39 +151,33 @@ class OneFrameLive[F[_]: Concurrent: Timer] private (
   }
 
   private def doOneUpstreamCall: F[Either[ServiceError, Unit]] =
-    NonEmptyList.fromList(Rate.Pair.allPairs) match {
-      case None =>
-        (ServiceError.OneFrameLookupFailed("No currency pairs defined"): ServiceError).asLeft[Unit].pure[F]
+    Timer[F].clock.realTime(MILLISECONDS).flatMap { startMs =>
+      Concurrent[F].delay(
+        logger.debug(LogEvent("upstream_fetch_start", "pair_count" -> Json.fromInt(allPairsNel.size)))
+      ) >>
+        oneFrameClient.getRates(allPairsNel).flatMap { result =>
+          Timer[F].clock.realTime(MILLISECONDS).flatMap { endMs =>
+            val durationMs = endMs - startMs
+            result match {
+              case Right(rates) =>
+                trackQuota >>
+                  nowUtc.flatMap(now => cache.putBatch(rates, now)) >>
+                  Concurrent[F].delay(
+                    logger.info(LogEvent("upstream_fetch_ok",
+                      "pair_count"  -> Json.fromInt(rates.size),
+                      "duration_ms" -> Json.fromLong(durationMs)
+                    ))
+                  ).as(().asRight[ServiceError])
 
-      case Some(pairs) =>
-        Timer[F].clock.realTime(MILLISECONDS).flatMap { startMs =>
-          Concurrent[F].delay(
-            logger.debug(LogEvent("upstream_fetch_start", "pair_count" -> Json.fromInt(pairs.size)))
-          ) >>
-            oneFrameClient.getRates(pairs).flatMap { result =>
-              Timer[F].clock.realTime(MILLISECONDS).flatMap { endMs =>
-                val durationMs = endMs - startMs
-                result match {
-                  case Right(rates) =>
-                    trackQuota >>
-                      nowUtc.flatMap(now => cache.putBatch(rates, now)) >>
-                      Concurrent[F].delay(
-                        logger.info(LogEvent("upstream_fetch_ok",
-                          "pair_count"  -> Json.fromInt(rates.size),
-                          "duration_ms" -> Json.fromLong(durationMs)
-                        ))
-                      ).as(().asRight[ServiceError])
-
-                  case Left(err) =>
-                    Concurrent[F].delay(
-                      logger.warn(LogEvent("upstream_fetch_error",
-                        "error"       -> Json.fromString(err.toString),
-                        "duration_ms" -> Json.fromLong(durationMs)
-                      ))
-                    ).as(err.asLeft[Unit])
-                }
-              }
+              case Left(err) =>
+                Concurrent[F].delay(
+                  logger.warn(LogEvent("upstream_fetch_error",
+                    "error"       -> Json.fromString(err.toString),
+                    "duration_ms" -> Json.fromLong(durationMs)
+                  ))
+                ).as(err.asLeft[Unit])
             }
+          }
         }
     }
 
@@ -259,4 +254,13 @@ object OneFrameLive {
       fetchGate    <- Ref.of[F, Option[Deferred[F, Either[ServiceError, Unit]]]](None)
       quotaCounter <- Ref.of[F, (Long, Long)]((0L, 0L))
     } yield new OneFrameLive[F](client, cache, fetchGate, quotaCounter, config)
+
+  private[interpreters] def makeWithCacheAndQuota[F[_]: Concurrent: Timer](
+      client: OneFrameClientAlgebra[F],
+      cache: CacheAlgebra[F],
+      quotaCounter: Ref[F, (Long, Long)],
+      config: ApplicationConfig
+  ): F[Algebra[F]] =
+    Ref.of[F, Option[Deferred[F, Either[ServiceError, Unit]]]](None)
+      .map(fetchGate => new OneFrameLive[F](client, cache, fetchGate, quotaCounter, config))
 }
